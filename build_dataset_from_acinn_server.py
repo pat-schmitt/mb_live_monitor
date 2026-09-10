@@ -4,7 +4,7 @@ todo:
 
 - rh: either rh500 or dew point temp or rh700
 
-
+nohup bash -c 'python -u build_dataset_from_acinn_server.py; echo "EXIT_CODE=$?"' > build_dataset.log 2>&1 &
 
 
 '''
@@ -26,6 +26,7 @@ import zipfile
 import tempfile
 import tarfile
 from datetime import timedelta
+from pyproj import CRS, Transformer
 
 
 # ============================================================
@@ -37,11 +38,11 @@ from datetime import timedelta
 
 base_folder = Path(r"/mnt/cosmo")                               # set to the real folder for full run
 
-output_path_nc = Path("StatHintereisModelArchive2.nc")           # names
-output_path_csv = Path("StatHintereisModelArchive2.csv")
+output_path_nc = Path("testHintereis_TE_B.nc")           # names
+output_path_csv = Path("testHintereis_TE_B.csv")
 
-target_lat = 46.798896
-target_lon = 10.760373
+target_lat = 46.790513
+target_lon = 10.750396
 
 min_hour = 2                                                    # depending on if the model is run daily or at different intervals adjust
 max_hour = 25                                                  # in some of the datasets the radiation is not available for the first 2 timesteps
@@ -50,6 +51,82 @@ tmp_base = Path("/mnt/data/workspace/tmp_extract")
 tmp_base.mkdir(parents=True, exist_ok=True)
 
 qc = False                                                      # quality control (needs adjustment in the ICON and cosmo dicts)
+
+# ============================================================
+# Model surface height
+# ============================================================
+
+icon_surface = xr.open_dataset("ICON_surfaceheight.nc")
+cosmo_surface = xr.open_dataset("COSMO1_surfaceheight.nc")
+
+
+# ============================================================
+# ICON nearest grid point
+# ============================================================
+
+icon_clat = icon_surface["CLAT"].values
+icon_clon = icon_surface["CLON"].values
+icon_hsurf = icon_surface["HSURF"].values
+
+icon_dist = (
+    (icon_clat - target_lat) ** 2
+    + (icon_clon - target_lon) ** 2
+)
+
+icon_idx = np.nanargmin(icon_dist)
+
+icon_model_altitude = float(icon_hsurf[icon_idx])
+
+print("ICON:")
+print("  lat:", float(icon_clat[icon_idx]))
+print("  lon:", float(icon_clon[icon_idx]))
+print("  model altitude:", icon_model_altitude)
+
+
+# ============================================================
+# COSMO nearest grid point
+# ============================================================
+
+cosmo_hsurf = np.asarray(cosmo_surface["h"]).squeeze()
+
+rlat = cosmo_surface["rlat"].values
+rlon = cosmo_surface["rlon"].values
+
+rlon_2d, rlat_2d = np.meshgrid(rlon, rlat)
+
+# Rotated COSMO grid -> normal lat/lon
+rotated_crs = CRS.from_cf(
+    cosmo_surface["rotated_pole"].attrs
+)
+
+transformer = Transformer.from_crs(
+    rotated_crs,
+    CRS.from_epsg(4326),
+    always_xy=True
+)
+
+cosmo_lon, cosmo_lat = transformer.transform(
+    rlon_2d,
+    rlat_2d
+)
+
+cosmo_dist = (
+    (cosmo_lat - target_lat) ** 2
+    + (cosmo_lon - target_lon) ** 2
+)
+
+cosmo_idx = np.unravel_index(
+    np.nanargmin(cosmo_dist),
+    cosmo_dist.shape
+)
+
+cosmo_model_altitude = float(cosmo_hsurf[cosmo_idx])
+
+print("COSMO:")
+print("  lat:", float(cosmo_lat[cosmo_idx]))
+print("  lon:", float(cosmo_lon[cosmo_idx]))
+print("  model altitude:", cosmo_model_altitude)
+
 
 
 # ==================================================
@@ -75,6 +152,29 @@ def acc_rain_to_mm(x):                                          #only works for 
         else:
             x_out[i] = x[i]
     return x_out
+
+def pressure_at_altitude(mslp, altitude):
+    
+    return mslp * (1 - 0.0065 * altitude / 288.15) ** 5.255
+
+
+def RH_dewpoint(T, Td):
+    """
+    Calculate relative humidity [%] from
+    temperature and dew point
+    """
+
+    T_c = T - 273.15
+    Td_c = Td - 273.15
+
+    RH = 100 * (
+        np.exp((17.625 * Td_c) / (243.04 + Td_c))
+        / np.exp((17.625 * T_c) / (243.04 + T_c))
+    )
+
+    return RH.clip(min=0, max=100)
+
+
 
 ICON = {
     "raw": {
@@ -425,16 +525,17 @@ icon_archives = sorted(
 )                                                                           # example filename: 2023_09_03_icon-ch1-eps_uibk_acinn.zip
 
 cosmo_archives_vnrz = sorted(
-    base_folder.glob("20*/VNRZ06.20*.tgz")                                  # example filename: 2023/VNRZ06.202309050300.tgz
+    base_folder.glob("20*/VNRZ06.20*0300.tgz")
+    
 )
 
 
 cosmo_archives_100 = sorted(
-    base_folder.glob("20*/*_100.tar.gz")                                    # example filename 2016/16012500_100.tar.gz                        
+    base_folder.glob("120*/*_100.tar.gz")                                    # example filename 2016/16012500_100.tar.gz                        
 )
 
 cosmo_archives_570 = sorted(
-    base_folder.glob("20*/*_570.tar.gz")                                    # example filename 2014/14012500_570.tar.gz
+    base_folder.glob("120*/*_570.tar.gz")                                    # example filename 2014/14012500_570.tar.gz
 )
 
 cosmo_archives = sorted(
@@ -503,6 +604,7 @@ def process_archives(file_archives, model_dict, model_name, grib_pattern):
     source_model = []
     archive_type = []
     source_archive = []
+    model_altitudes = []
 
     for archive in file_archives:
 
@@ -574,11 +676,13 @@ def process_archives(file_archives, model_dict, model_name, grib_pattern):
                     lons = None
                     idx = None
                     valid_date = None
+                    model_altitude = np.nan
 
                     for var_name, meta in model_dict["raw"].items():
 
                         try:
                             grb = grbs.message(meta["GRIB_key_number"])
+
                         except RuntimeError as e:
                             print(
                                 f"Missing GRIB message: {model_name} {var_name}, "
@@ -587,33 +691,50 @@ def process_archives(file_archives, model_dict, model_name, grib_pattern):
                             )
                             continue
 
+                        # Find nearest grid point once per GRIB file
                         if lats is None:
+
                             lats, lons = grb.latlons()
 
-                            dist = (lats - target_lat) ** 2 + (lons - target_lon) ** 2
-                            idx = np.unravel_index(np.argmin(dist),dist.shape)
+                            dist = (
+                                (lats - target_lat) ** 2
+                                + (lons - target_lon) ** 2
+                            )
+
+                            idx = np.unravel_index(
+                                np.argmin(dist),
+                                dist.shape
+                            )
+
+                            # Model surface altitude
+                            if model_name == "ICON":
+
+                                model_altitude = icon_model_altitude
+
+                            elif model_name == "COSMO":
+                                model_altitude = cosmo_model_altitude
 
                         if valid_date is None:
+
                             valid_date = grb.validDate
 
                             if model_name == "COSMO":
                                 hour_offset = int(file.stem.split("_")[-1])
-                                valid_date = valid_date + timedelta(hours=hour_offset) 
+                                valid_date = valid_date + timedelta(hours=hour_offset)
 
                         raw_value = float(grb.values[idx])
 
                         value = meta["convert"](raw_value)
-                        #value = raw_value
 
                         vmin, vmax = meta["valid_range"]
 
-                        
                         if qc:
 
                             if vmin <= value <= vmax:
                                 values_by_var[var_name] = value
                             else:
                                 values_by_var[var_name] = np.nan
+
                                 print(
                                     f"QC failed: {model_name} {var_name}, "
                                     f"value={value:.3f}, "
@@ -621,6 +742,7 @@ def process_archives(file_archives, model_dict, model_name, grib_pattern):
                                     f"file={file.name}, "
                                     f"time={grb.validDate}"
                                 )
+
                         else:
                             values_by_var[var_name] = value
 
@@ -633,6 +755,7 @@ def process_archives(file_archives, model_dict, model_name, grib_pattern):
                 source_model.append(this_source_model)
                 archive_type.append(this_archive_type)
                 source_archive.append(archive.name)
+                model_altitudes.append(model_altitude)
 
                 for var in variables:
                     data[var].append(values_by_var[var])
@@ -653,6 +776,14 @@ def process_archives(file_archives, model_dict, model_name, grib_pattern):
                 )
                 for var in variables
             },
+            "model_altitude": (
+                ("time",),
+                np.array(model_altitudes, dtype=float),
+                {
+                    "long_name": "Surface altitude of selected model grid cell",
+                    "units": "m",
+                },
+            ),
             "source_model": (
                 ("time",),
                 np.array(source_model, dtype=str),
@@ -699,7 +830,47 @@ def process_archives(file_archives, model_dict, model_name, grib_pattern):
     ds = ds.sortby("time")
 
 
-  
+    # ============================================================
+    # Pressure at model grid-cell altitude
+    # ============================================================
+
+    n
+    ds["PRES_raw"] = ds["PRES"].copy()
+
+    ds["PRES_raw"].attrs = {
+        "long_name": "Original pressure from model archive",
+        "units": "hPa",
+    }
+
+    ds["PRES"] = pressure_at_altitude(
+        ds["PRES_raw"],
+        ds["model_altitude"]
+    )
+
+    ds["PRES"].attrs = {
+        "long_name": "Air pressure at model grid-cell altitude",
+        "units": "hPa",
+    }
+
+
+    # ============================================================
+    # Relative humidity from T2 and Td2
+    # ============================================================
+
+    ds["RH2"] = RH_dewpoint(
+        ds["T2"],
+        ds["Td2"]
+    )
+
+    ds["RH2"].attrs = {
+        "long_name": "Relative humidity at 2 m",
+        "units": "%",
+    }
+
+
+    # ============================================================
+    # Other derived variables
+    # ============================================================
 
     for var_name, meta in model_dict["derived"].items():
 
@@ -782,7 +953,7 @@ ds_final = ds_final.assign_coords(
 ds_final.attrs["description"] = (
     "Combined COSMO/ICON point time series; ICON preferred where overlapping"
 )
-
+ds_final = ds_final.rename({"time": "TIMESTAMP"})
 
 ds_final.to_netcdf(output_path_nc, mode="w", format="NETCDF4")
 ds_final.to_dataframe().to_csv(output_path_csv, index=True)
