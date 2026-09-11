@@ -1,0 +1,76 @@
+# This is the utilities configuration file.
+# Please make your changes here.
+#
+# To call variables in a utility script:
+# from cosipy.utilities.config import UtilitiesConfig
+# in_K = UtilitiesConfig.aws2cosipy.names["in_K"]
+#
+# Alternatively:
+# cfg_names = UtilitiesConfig.aws2cosipy.names
+# in_K = cfg_names["in_K"]
+
+# AWS2COSIPY
+[aws2cosipy.names]
+PRES_var = 'PRES_alt'
+T2_var = 'T2'
+in_K = true  # input data is already in K
+RH2_var = 'RH_dewpoint'
+G_var = 'G'
+RRR_var = 'RRR_h'
+U2_var = 'U10'
+LWin_var = 'LWin'
+SNOWFALL_var = 'SNOWFALL_h'
+N_var = 'N'
+
+[aws2cosipy.coords]
+WRF = false
+aggregate = false
+aggregation_step = 'H'
+delimiter = ','
+
+[aws2cosipy.radiation]
+radiationModule = 'Wohlfahrt2016' # 'Moelg2009', 'Wohlfahrt2016', 'none'
+LUT = false  # If there is already a Look-up-table for topographic shading and sky-view-factor built for this area, set to True
+LUT_path = "./data/static/LUT_Rad.nc"
+dtstep = 3600 #10800  # time step (s)
+tcart = 26  # Station time correction in hour angle units (1 is 4 min)
+timezone_lon = 15.0  # Longitude of station
+zeni_thld = 89.0  # If you do not know the exact value for your location, set value to 89.0
+
+[aws2cosipy.points]
+point_model = true
+plon = 10.744
+plat = 46.7924
+hgt = 3030.0
+
+[aws2cosipy.station]
+stationName = 'HinteresEis'
+stationAlt = 2976.0
+stationLat = 46.79748  # Latitude of station
+
+[aws2cosipy.lapse]
+lapse_T = -0.006  # Temp K per  m
+lapse_RH = 0.000  # RH % per m (0 to 1)
+lapse_RRR = 0.0000  # mm per m
+lapse_SNOWFALL = 0.0000  # Snowfall % per m (0 to 1)
+
+# CREATE STATIC FILE
+[create_static.paths]
+static_folder = "./data/static/"
+dem_path = "DEM/HEF_DEM_20130903.tif"
+shape_path = "Shapefiles/Hintereisferner_RGI7.shp"
+output_file = "HEF_static.nc"
+
+[create_static.coords]
+tile = true
+aggregate = true
+aggregate_degree = 0.0003
+longitude_upper_left = 10.72
+latitude_upper_left = 46.82
+longitude_lower_right = 10.81
+latitude_lower_right = 46.78
+
+# WRF2COSIPY
+[wrf2cosipy.constants]
+hu = 10  # Height of WRF wind velocity
+lu_class = 24 # land use class for glaciers
